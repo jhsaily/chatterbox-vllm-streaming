@@ -185,14 +185,14 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         self.input_embedding = nn.Embedding(vocab_size, input_size)
         self.spk_embed_affine_layer = torch.nn.Linear(spk_embed_dim, output_size)
         self.encoder = encoder
-        self.encoder_proj = torch.nn.Linear(self.encoder.output_size(), output_size)
+        self.encoder_proj = torch.nn.Linear(encoder.output_size(), output_size)
         self.decoder = decoder
         self.only_mask_loss = only_mask_loss
         self.token_mel_ratio = token_mel_ratio
         self.pre_lookahead_len = pre_lookahead_len
         self.fp16 = use_fp16
 
-    @torch.inference_mode()
+    #@torch.inference_mode()
     def inference(self,
                   token,
                   token_len,
@@ -201,7 +201,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
                   prompt_feat,
                   prompt_feat_len,
                   embedding,
-                  finalize,
+                  finalize: bool,
                   n_timesteps: int):
         embedding = embedding.to(self.spk_embed_affine_layer.weight.dtype)
         prompt_feat = prompt_feat.to(self.spk_embed_affine_layer.weight.dtype)

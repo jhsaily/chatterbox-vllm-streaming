@@ -1,12 +1,13 @@
 import math
-from typing import Optional
+from typing import Optional, Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from conformer import ConformerBlock
 from diffusers.models.activations import get_activation
-from einops import pack, rearrange, repeat
+import einops.packing as ep
+from einops import rearrange, repeat
 
 from .transformer import BasicTransformerBlock
 
@@ -17,7 +18,7 @@ class SinusoidalPosEmb(torch.nn.Module):
         self.dim = dim
         assert self.dim % 2 == 0, "SinusoidalPosEmb requires dim to be even"
 
-    def forward(self, x, scale=1000):
+    def forward(self, x, scale: int=1000):
         if x.ndim < 1:
             x = x.unsqueeze(0)
         device = x.device
@@ -102,8 +103,8 @@ class TimestepEmbedding(nn.Module):
         else:
             self.post_act = get_activation(post_act_fn)
 
-    def forward(self, sample, condition=None):
-        if condition is not None:
+    def forward(self, sample, condition: Any=None):
+        if self.cond_proj is not None and condition is not None:
             sample = sample + self.cond_proj(condition)
         sample = self.linear_1(sample)
 
@@ -381,11 +382,12 @@ class Decoder(nn.Module):
         t = self.time_embeddings(t)
         t = self.time_mlp(t)
 
-        x = pack([x, mu], "b * t")[0]
+        x = ep.pack([x, mu], "b * t")[0]
 
         if spks is not None:
-            spks = repeat(spks, "b c -> b c t", t=x.shape[-1])
-            x = pack([x, spks], "b * t")[0]
+            #spks = repeat(spks, "b c -> b c t", t=x.shape[-1])
+            spks = spks.unsqueeze(-1).expand(-1, -1, x.shape[-1])
+            x = ep.pack([x, spks], "b * t")[0]
 
         hiddens = []
         masks = [mask]
@@ -424,7 +426,7 @@ class Decoder(nn.Module):
 
         for resnet, transformer_blocks, upsample in self.up_blocks:
             mask_up = masks.pop()
-            x = resnet(pack([x, hiddens.pop()], "b * t")[0], mask_up, t)
+            x = resnet(ep.pack([x, hiddens.pop()], "b * t")[0], mask_up, t)
             x = rearrange(x, "b c t -> b t c")
             mask_up = rearrange(mask_up, "b 1 t -> b t")
             for transformer_block in transformer_blocks:

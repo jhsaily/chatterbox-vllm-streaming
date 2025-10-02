@@ -43,9 +43,10 @@ class ConditionalCFM(BASECFM):
         # Just change the architecture of the estimator here
         self.estimator = estimator
         self.lock = threading.Lock()
+        self.estimator_is_module = isinstance(self.estimator, torch.nn.Module)
 
-    @torch.inference_mode()
-    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, prompt_len=0, flow_cache=torch.zeros(1, 80, 0, 2)):
+    # @torch.inference_mode()
+    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, prompt_len=0, flow_cache=None):
         """Forward diffusion
 
         Args:
@@ -63,6 +64,9 @@ class ConditionalCFM(BASECFM):
             sample: generated mel-spectrogram
                 shape: (batch_size, n_feats, mel_timesteps)
         """
+
+        if flow_cache is None:
+            flow_cache = torch.zeros(1, 80, 0, 2)
 
         z = torch.randn_like(mu).to(mu.device).to(mu.dtype) * temperature
         cache_size = flow_cache.shape[2]
@@ -133,24 +137,25 @@ class ConditionalCFM(BASECFM):
         return sol[-1].float()
 
     def forward_estimator(self, x, mask, mu, t, spks, cond):
-        if isinstance(self.estimator, torch.nn.Module):
+        if self.estimator_is_module:
             return self.estimator.forward(x, mask, mu, t, spks, cond)
         else:
-            with self.lock:
-                self.estimator.set_input_shape('x', (2, 80, x.size(2)))
-                self.estimator.set_input_shape('mask', (2, 1, x.size(2)))
-                self.estimator.set_input_shape('mu', (2, 80, x.size(2)))
-                self.estimator.set_input_shape('t', (2,))
-                self.estimator.set_input_shape('spks', (2, 80))
-                self.estimator.set_input_shape('cond', (2, 80, x.size(2)))
+            print('uh oh, we got a TensorRT estimator')
+            #with self.lock:
+            #    self.estimator.set_input_shape('x', (2, 80, x.size(2)))
+            #    self.estimator.set_input_shape('mask', (2, 1, x.size(2)))
+            #    self.estimator.set_input_shape('mu', (2, 80, x.size(2)))
+            #    self.estimator.set_input_shape('t', (2,))
+            #    self.estimator.set_input_shape('spks', (2, 80))
+            #    self.estimator.set_input_shape('cond', (2, 80, x.size(2)))
                 # run trt engine
-                self.estimator.execute_v2([x.contiguous().data_ptr(),
-                                           mask.contiguous().data_ptr(),
-                                           mu.contiguous().data_ptr(),
-                                           t.contiguous().data_ptr(),
-                                           spks.contiguous().data_ptr(),
-                                           cond.contiguous().data_ptr(),
-                                           x.data_ptr()])
+            #    self.estimator.execute_v2([x.contiguous().data_ptr(),
+            #                               mask.contiguous().data_ptr(),
+            #                               mu.contiguous().data_ptr(),
+            #                               t.contiguous().data_ptr(),
+            #                               spks.contiguous().data_ptr(),
+            #                               cond.contiguous().data_ptr(),
+            #                               x.data_ptr()])
             return x
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None):
@@ -200,8 +205,8 @@ class CausalConditionalCFM(ConditionalCFM):
         super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
         self.rand_noise = torch.randn([1, 80, 50 * 300])
 
-    @torch.inference_mode()
-    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None):
+    # @torch.inference_mode()
+    def forward(self, mu, mask, n_timesteps: int, temperature: float =1.0, spks=None, cond=None):
         """Forward diffusion
 
         Args:

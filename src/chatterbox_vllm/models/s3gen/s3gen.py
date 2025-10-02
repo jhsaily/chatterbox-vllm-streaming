@@ -288,7 +288,7 @@ class S3Token2Wav(S3Token2Mel):
         return super().forward(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize, n_timesteps=n_timesteps)
 
     @torch.inference_mode()
-    def hift_inference(self, speech_feat, cache_source: torch.Tensor = None):
+    def hift_inference(self, speech_feat, cache_source: Optional[torch.Tensor] = None):
         if cache_source is None:
             cache_source = torch.zeros(1, 1, 0).to(self.device)
         return self.mel2wav.inference(speech_feat=speech_feat, cache_source=cache_source)
@@ -302,7 +302,7 @@ class S3Token2Wav(S3Token2Mel):
         ref_sr: Optional[int] = None,
         # pre-computed ref embedding (prod API)
         ref_dict: Optional[dict] = None,
-        cache_source: torch.Tensor = None, # NOTE: this arg is for streaming, it can probably be removed here
+        cache_source: Optional[torch.Tensor] = None, # NOTE: this arg is for streaming, it can probably be removed here
         finalize: bool = True,
         no_trim: bool = False,
         n_timesteps: int = 10,
@@ -312,6 +312,8 @@ class S3Token2Wav(S3Token2Mel):
 
         # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         if not no_trim:
-            output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
+            fade_len = min(output_wavs.shape[1], len(self.trim_fade))
+            output_wavs[:, :fade_len] *= self.trim_fade[:fade_len]
+            #output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
         return output_wavs, output_sources

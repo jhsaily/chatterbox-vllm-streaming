@@ -26,7 +26,7 @@ class BASECFM(torch.nn.Module, ABC):
 
         self.estimator = None
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None):
         """Forward diffusion
 

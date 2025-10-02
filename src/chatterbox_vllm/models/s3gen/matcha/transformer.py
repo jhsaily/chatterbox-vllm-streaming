@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,6 +12,53 @@ from diffusers.models.attention import (
 from diffusers.models.attention_processor import Attention
 from diffusers.models.lora import LoRACompatibleLinear
 from diffusers.utils.torch_utils import maybe_allow_in_graph
+
+from torch.nn import functional as F
+
+
+class TorchScriptableLayerNorm(nn.LayerNorm):
+    def __init__(self, dim, elementwise_affine=True):
+        super().__init__(dim, elementwise_affine=elementwise_affine)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        timestep: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
+        hidden_dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps), x, x, x, x)
+
+
+class TorchScriptableAdaLayerNorm(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        timestep: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
+        hidden_dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (self.module(x, timestep), x, x, x, x)
+
+
+class TorchScriptableAdaLayerNormZero(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        timestep: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
+        hidden_dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # This returns a tuple just like AdaLayerNormZero
+        return self.module(x, timestep, class_labels, hidden_dtype=hidden_dtype)
 
 
 class SnakeBeta(nn.Module):
@@ -188,11 +235,11 @@ class BasicTransformerBlock(nn.Module):
         # Define 3 blocks. Each block has its own normalization layer.
         # 1. Self-Attn
         if self.use_ada_layer_norm:
-            self.norm1 = AdaLayerNorm(dim, num_embeds_ada_norm)
+            self.norm1 = TorchScriptableAdaLayerNorm(AdaLayerNorm(dim, num_embeds_ada_norm))
         elif self.use_ada_layer_norm_zero:
-            self.norm1 = AdaLayerNormZero(dim, num_embeds_ada_norm)
+            self.norm1 = TorchScriptableAdaLayerNormZero(AdaLayerNormZero(dim, num_embeds_ada_norm))
         else:
-            self.norm1 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine)
+            self.norm1 = TorchScriptableLayerNorm(dim, elementwise_affine=norm_elementwise_affine)
         self.attn1 = Attention(
             query_dim=dim,
             heads=num_attention_heads,
@@ -247,27 +294,30 @@ class BasicTransformerBlock(nn.Module):
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         timestep: Optional[torch.LongTensor] = None,
-        cross_attention_kwargs: Dict[str, Any] = None,
+        cross_attention_kwargs: Optional[Dict[str, torch.Tensor]] = None,
         class_labels: Optional[torch.LongTensor] = None,
     ):
         # Notice that normalization is always applied before the real computation in the following blocks.
         # 1. Self-Attention
         if self.use_ada_layer_norm:
-            norm_hidden_states = self.norm1(hidden_states, timestep)
+            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, timestep)
         elif self.use_ada_layer_norm_zero:
             norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(
                 hidden_states, timestep, class_labels, hidden_dtype=hidden_states.dtype
             )
         else:
-            norm_hidden_states = self.norm1(hidden_states)
+            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states)
 
-        cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
+        if cross_attention_kwargs is not None:
+            print(cross_attention_kwargs)
+
+        # cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
 
         attn_output = self.attn1(
             norm_hidden_states,
             encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
             attention_mask=encoder_attention_mask if self.only_cross_attention else attention_mask,
-            **cross_attention_kwargs,
+            # **cross_attention_kwargs,
         )
         if self.use_ada_layer_norm_zero:
             attn_output = gate_msa.unsqueeze(1) * attn_output
@@ -283,7 +333,7 @@ class BasicTransformerBlock(nn.Module):
                 norm_hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,
-                **cross_attention_kwargs,
+                # **cross_attention_kwargs,
             )
             hidden_states = attn_output + hidden_states
 

@@ -17,7 +17,7 @@
 
 """HIFI-GAN"""
 
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any, Tuple
 import numpy as np
 from scipy.signal import get_window
 import torch
@@ -152,11 +152,11 @@ class ResBlock(torch.nn.Module):
         ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for idx in range(len(self.convs1)):
-            xt = self.activations1[idx](x)
-            xt = self.convs1[idx](xt)
-            xt = self.activations2[idx](xt)
-            xt = self.convs2[idx](xt)
+        for activations1, convs1, activations2, convs2 in zip(self.activations1, self.convs1, self.activations2, self.convs2):
+            xt = activations1(x)
+            xt = convs1(xt)
+            xt = activations2(xt)
+            xt = convs2(xt)
             x = xt + x
         return x
 
@@ -197,7 +197,7 @@ class SineGen(torch.nn.Module):
         uv = (f0 > self.voiced_threshold).type(torch.float32)
         return uv
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def forward(self, f0):
         """
         :param f0: [B, 1, sample_len], Hz
@@ -209,8 +209,10 @@ class SineGen(torch.nn.Module):
             F_mat[:, i: i + 1, :] = f0 * (i + 1) / self.sampling_rate
 
         theta_mat = 2 * np.pi * (torch.cumsum(F_mat, dim=-1) % 1)
-        u_dist = Uniform(low=-np.pi, high=np.pi)
-        phase_vec = u_dist.sample(sample_shape=(f0.size(0), self.harmonic_num + 1, 1)).to(F_mat.device)
+        # u_dist = Uniform(low=-np.pi, high=np.pi)
+        # phase_vec = u_dist.sample(sample_shape=(f0.size(0), self.harmonic_num + 1, 1)).to(F_mat.device)
+        rand = torch.rand((f0.size(0), self.harmonic_num + 1, 1), device=F_mat.device, dtype=F_mat.dtype)
+        phase_vec = -np.pi + (2 * np.pi) * rand
         phase_vec[:, 0, :] = 0
 
         # generate sine waveforms
@@ -353,6 +355,7 @@ class HiFTGenerator(nn.Module):
         downsample_rates = [1] + upsample_rates[::-1][:-1]
         downsample_cum_rates = np.cumprod(downsample_rates)
         for i, (u, k, d) in enumerate(zip(downsample_cum_rates[::-1], source_resblock_kernel_sizes, source_resblock_dilation_sizes)):
+            u = int(u)
             if u == 1:
                 self.source_downs.append(
                     Conv1d(istft_params["n_fft"] + 2, base_channels // (2 ** (i + 1)), 1, 1)
@@ -414,25 +417,54 @@ class HiFTGenerator(nn.Module):
         s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
 
         x = self.conv_pre(x)
-        for i in range(self.num_upsamples):
+        #for i in range(self.num_upsamples):
+        for i, (ups, sd, sr) in enumerate(zip(self.ups, self.source_downs, self.source_resblocks)):
             x = F.leaky_relu(x, self.lrelu_slope)
-            x = self.ups[i](x)
+            x = ups(x)
 
             if i == self.num_upsamples - 1:
                 x = self.reflection_pad(x)
 
             # fusion
-            si = self.source_downs[i](s_stft)
-            si = self.source_resblocks[i](si)
+            si = sd(s_stft)
+            si = sr(si)
             x = x + si
 
-            xs = None
-            for j in range(self.num_kernels):
+            xs: Optional[torch.Tensor] = None
+            #for j in range(self.num_kernels):
+            #    if xs is None:
+            #        xs = self.resblocks[i * self.num_kernels + j](x)
+            #    else:
+            #        xs += self.resblocks[i * self.num_kernels + j](x)
+            if i == 0:
                 if xs is None:
-                    xs = self.resblocks[i * self.num_kernels + j](x)
+                    xs = self.resblocks[0](x)
                 else:
-                    xs += self.resblocks[i * self.num_kernels + j](x)
-            x = xs / self.num_kernels
+                    xs += self.resblocks[0](x)
+
+                xs += self.resblocks[1](x)
+                xs += self.resblocks[2](x)
+            elif i == 1:
+                if xs is None:
+                    xs = self.resblocks[3](x)
+                else:
+                    xs += self.resblocks[3](x)
+
+                xs += self.resblocks[4](x)
+                xs += self.resblocks[5](x)
+            elif i == 2:
+                if xs is None:
+                    xs = self.resblocks[6](x)
+                else:
+                    xs += self.resblocks[6](x)
+
+                xs += self.resblocks[7](x)
+                xs += self.resblocks[8](x)
+            if xs is None:
+                xs_temp = x
+            else:
+                xs_temp = xs
+            x = xs_temp / self.num_kernels
 
         x = F.leaky_relu(x)
         x = self.conv_post(x)
@@ -445,9 +477,10 @@ class HiFTGenerator(nn.Module):
 
     def forward(
             self,
-            batch: dict,
+            batch: Dict[str, torch.Tensor],
             device: torch.device,
-    ) -> Dict[str, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        print(type(batch['speech_feat']))
         speech_feat = batch['speech_feat'].transpose(1, 2).to(device)
         # mel->f0
         f0 = self.f0_predictor(speech_feat)
@@ -459,8 +492,8 @@ class HiFTGenerator(nn.Module):
         generated_speech = self.decode(x=speech_feat, s=s)
         return generated_speech, f0
 
-    @torch.inference_mode()
-    def inference(self, speech_feat: torch.Tensor, cache_source: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
+    #@torch.inference_mode()
+    def inference(self, speech_feat: torch.Tensor, cache_source: torch.Tensor = torch.zeros(1, 1, 0)) -> Tuple[torch.Tensor, torch.Tensor]:
         # mel->f0
         f0 = self.f0_predictor(speech_feat)
         # f0->source
